@@ -1,0 +1,236 @@
+//**************************************************************************
+//--------------------------------------------------------------------------
+// ercesiMIPS Single Cycle Processor Control path
+//
+// Meng zhang
+// version 0.1
+//--------------------------------------------------------------------------
+//**************************************************************************
+
+package SingleCycle
+
+import chisel3._
+import chisel3.util._
+import scala.io.Source
+class CtltoDatIo extends Bundle()
+{
+    val nPC_MUX_sel = Output(UInt(1.W))
+    val RegWr       = Output(UInt(1.W))
+    val RegDst      = Output(UInt(1.W))
+    val ExtOp       = Output(UInt(1.W))
+    val ALUctr      = Output(UInt(3.W))
+    val ALUsrc      = Output(UInt(1.W))
+    val MemtoReg    = Output(UInt(1.W))
+    val irwr        = Output(UInt(1.W))
+    //there should be Branch and Jump signal
+    val Branch      =Output(UInt(1.W))
+    val Jump        =Output(UInt(1.W))
+    //val MemWr     = Output(UInt(1.W))
+    val Rd          = Output(UInt(5.W))
+    val Rt          = Output(UInt(5.W))
+    val Rs          = Output(UInt(5.W))
+    val Imm16       = Output(UInt(16.W))
+    val Imm26       = Output(UInt(26.W))
+}
+
+class CPathIo extends Bundle()
+{
+    val Inst        = Input(UInt(32.W))////ok
+    val boot        = Input(UInt(1.W))
+    val MemWr       = Output(UInt(1.W))////ok
+    val valid       = Output(UInt(1.W))
+    val ctl         = new CtltoDatIo()////ok
+    val dat         = new DatToCtlIo().flip()////ok
+
+}
+class CtlPath extends Module()
+{
+    val io = IO(new CPathIo ())
+    val op = io.Inst(31,26)
+    val func = io.Inst(5,0)
+    io.valid := 1.U
+    val s_idle :: s_ifetch ::s_decode :: s_beqcom :: s_oriexec :: s_orifin :: s_rexec :: s_rfin :: s_swcal :: s_swmem :: s_lwcal :: s_lwmem :: s_lwwr = enum(13)
+    val state = RegInit(0.U(32.W))
+    state := s_idle
+    when(io.boot === 0.U){
+    state := s_ifetch
+    when( op=== "b000000".U &&state === s_ifetch)
+    {
+        state := s_decode
+        io.ctl.nPC_MUX_sel:=0.U
+        io.ctl.RegDst:=1.U
+        io.ctl.RegWr:=1.U
+        io.ctl.ExtOp:=0.U
+        io.ctl.MemtoReg:=0.U // the data source to Reg
+        io.MemWr:=0.U
+        io.ctl.Jump:=0.U
+        io.ctl.Branch:=0.U
+        io.ctl.ALUsrc:=0.U
+        io.ctl.Rs := io.Inst(25,21)
+        io.ctl.Rt := io.Inst(20,16)
+        io.ctl.Rd := io.Inst(15,11)
+        switch (func)
+        {
+            is("b100000".U)//add
+            {
+                 io.ctl.ALUctr:="b010".U
+            }
+            is ("b100010".U)//sub
+            {
+                 io.ctl.ALUctr:="b110".U
+            }
+            is("b100100".U)//and
+            {
+                 io.ctl.ALUctr:="b000".U
+            }
+            is("b100101".U)//or
+            {
+                io.ctl.ALUctr:="b001".U
+            }
+            is("b101010".U)//slt
+            {
+                 io.ctl.ALUctr:="b111".U
+            }
+            is("b000000".U)
+            {
+                when(io.Inst === 0.U){
+                    io.valid := 1.U//nop
+                }
+            }
+        }
+        
+    }.elsewhen(op==="b100011".U)//lw
+    {
+        io.ctl.Rs := io.Inst(25,21)
+        io.ctl.Rt := io.Inst(20,16)
+        io.ctl.Rd := io.Inst(15,11)
+        io.ctl.Imm16 := io.Inst(15,0)
+        io.ctl.Imm26 := io.Inst(25,0)
+        io.ctl.nPC_MUX_sel:=0.U
+        io.ctl.RegWr:=1.U
+        io.ctl.RegDst:=0.U
+        io.ctl.ExtOp:=1.U//sign extends
+        io.ctl.ALUsrc:=1.U
+        io.ctl.MemtoReg:=1.U
+        io.MemWr:=0.U
+        io.ctl.Jump:=0.U
+        io.ctl.Branch:=0.U
+        io.ctl.ALUctr:="b010".U
+    }.elsewhen(op==="b101011".U)//sw
+    {
+        io.ctl.Rs := io.Inst(25,21)
+        io.ctl.Rt := io.Inst(20,16)
+        io.ctl.Rd := io.Inst(15,11)
+        io.ctl.Imm16 := io.Inst(15,0)
+        io.ctl.Imm26 := io.Inst(25,0)
+        io.ctl.nPC_MUX_sel:=0.U
+        io.ctl.RegWr:=0.U //Don't care
+        io.ctl.RegDst:=0.U
+        io.ctl.ExtOp:=1.U // Sign Extend
+        io.ctl.ALUsrc:=1.U 
+        io.ctl.MemtoReg:=0.U//Don't care
+        io.MemWr:=1.U 
+        io.ctl.Jump:=0.U
+        io.ctl.Branch:=0.U
+        io.ctl.ALUctr:="b010".U
+    }.elsewhen(op==="b000100".U)//beq branch when equal
+    {
+        //io.ctl.nPC_MUX_sel=0.U
+        io.ctl.Rs := io.Inst(25,21)
+        io.ctl.Rt := io.Inst(20,16)
+        io.ctl.Rd := io.Inst(15,11)
+        io.ctl.Imm16 := io.Inst(15,0)
+        io.ctl.Imm26 := io.Inst(25,0)
+        when(io.dat.zero===1.U)
+        {
+            io.ctl.nPC_MUX_sel:=1.U
+
+        }.elsewhen(io.dat.zero===0.U)
+        {
+            io.ctl.nPC_MUX_sel:=0.U
+
+        }
+        io.ctl.RegWr:=0.U
+        io.ctl.RegDst:=0.U
+        io.ctl.ExtOp:=1.U
+        io.ctl.ALUctr:="b110".U //sub
+        io.ctl.ALUsrc:=0.U
+        io.ctl.MemtoReg:=0.U
+        io.MemWr:=0.U
+        io.ctl.Jump:=0.U
+        io.ctl.Branch:=1.U
+    }.elsewhen(op==="b001101".U)//ori
+    {
+        io.ctl.Rs := io.Inst(25,21)
+        io.ctl.Rt := io.Inst(20,16)
+        io.ctl.Rd := io.Inst(15,11)
+        io.ctl.Imm16 := io.Inst(15,0)
+        io.ctl.Imm26 := io.Inst(25,0)
+        io.ctl.nPC_MUX_sel:=0.U
+        io.ctl.RegWr:=1.U
+        io.ctl.RegDst:=0.U
+        io.ctl.ExtOp:=1.U
+        io.ctl.ALUctr:="b001".U
+        io.ctl.ALUsrc:=1.U
+        io.ctl.MemtoReg:=0.U
+        io.MemWr:=0.U
+        io.ctl.Jump:=0.U
+        io.ctl.Branch:=0.U
+    }.elsewhen(op==="b000010".U)//j
+    {
+        io.ctl.Rs := io.Inst(25,21)
+        io.ctl.Rt := io.Inst(20,16)
+        io.ctl.Rd := io.Inst(15,11)
+        io.ctl.Imm16 := io.Inst(15,0)
+        io.ctl.Imm26 := io.Inst(25,0)
+        io.ctl.nPC_MUX_sel:=1.U
+        io.ctl.RegWr:=0.U
+        io.ctl.RegDst :=0.U
+        io.ctl.ExtOp :=0.U
+        io.ctl.ALUctr :="b000".U
+        io.ctl.ALUsrc :=1.U
+        io.ctl.MemtoReg :=0.U
+        io.MemWr :=0.U
+        io.ctl.Jump :=1.U
+        io.ctl.Branch := 0.U
+    }.elsewhen(op==="b001000".U)//andi
+    {
+        io.ctl.Rs := io.Inst(25,21)
+        io.ctl.Rt := io.Inst(20,16)
+        io.ctl.Rd := io.Inst(15,11)
+        io.ctl.Imm16 := io.Inst(15,0)
+        io.ctl.Imm26 := io.Inst(25,0)
+        io.ctl.nPC_MUX_sel :=0.U
+        io.ctl.RegWr :=1.U
+        io.ctl.RegDst :=0.U
+        io.ctl.ExtOp :=1.U
+        io.ctl.ALUctr :="b000".U
+        io.ctl.ALUsrc :=1.U
+        io.ctl.MemtoReg :=0.U
+        io.MemWr:=0.U
+        io.ctl.Jump:=0.U
+        io.ctl.Branch:=0.U
+    }.elsewhen(op==="b001101".U)//ori
+    {
+        io.ctl.Rs := io.Inst(25,21)
+        io.ctl.Rt := io.Inst(20,16)
+        io.ctl.Rd := io.Inst(15,11)
+        io.ctl.Imm16 := io.Inst(15,0)
+        io.ctl.Imm26 := io.Inst(25,0)
+        io.ctl.nPC_MUX_sel:=0.U
+        io.ctl.RegWr:=1.U
+        io.ctl.RegDst:=0.U
+        io.ctl.ExtOp:=1.U
+        io.ctl.ALUctr:="b001".U
+        io.ctl.ALUsrc:=1.U
+        io.ctl.MemtoReg:=0.U
+        io.MemWr:=0.U
+        io.ctl.Jump:=0.U
+        io.ctl.Branch:=0.U
+    }.otherwise{
+        io.valid := 0.U
+    }
+
+    }
+    
+}
